@@ -21,7 +21,10 @@
   .ask { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
   .ask input[type=text] { flex: 1 1 260px; min-width: 0; padding: 8px 10px; border: 1px solid var(--line);
                           border-radius: 8px; font: inherit; background: #fff; color: inherit; }
-  .ask input.name { flex: 0 1 140px; }
+  .ask input.name { flex: 0 1 140px; min-width: 0; padding: 8px 10px; border: 1px solid var(--line);
+                    border-radius: 8px; font: inherit; background: #fff; color: inherit; }
+  input:disabled { opacity: var(--disabled); }
+  .role { color: var(--muted); font-size: 12px; margin-top: 6px; }
   .error { color: var(--bad); font-size: 13px; margin-top: 6px; min-height: 0; }
   button { font: inherit; border: 1px solid var(--line); background: #fff; color: inherit;
            border-radius: 8px; padding: 6px 10px; cursor: pointer; }
@@ -58,8 +61,10 @@
     <div class="row">
       <input type="text" id="text" placeholder="Ask a question" autocomplete="off">
       <input type="text" class="name" id="name" placeholder="Your name" autocomplete="off">
+      <input type="password" class="name" id="password" placeholder="Speaker password" autocomplete="off">
       <button class="primary" id="send" type="submit">Ask</button>
     </div>
+    <div class="role" id="role"></div>
     <div class="error" id="error"></div>
   </form>
 
@@ -77,12 +82,20 @@
 const $ = (id) => document.getElementById(id);
 let routes = {};      // "METHOD path" -> list of query parameter names
 let busy = false;
+let session = null;   // {token, name, role} after POST /login
+let cached = { url: null, etag: null, data: [] };
 
 // Remember a name per browser so votes come from the same "person".
 const NAME_KEY = "askboard-name";
 try { $("name").value = localStorage.getItem(NAME_KEY) || ""; } catch (e) {}
 if (!$("name").value) $("name").value = "guest-" + Math.floor(Math.random() * 900 + 100);
-$("name").addEventListener("change", () => { try { localStorage.setItem(NAME_KEY, $("name").value); } catch (e) {} });
+for (const id of ["name", "password"]) {
+  $(id).addEventListener("change", () => {
+    session = null;
+    try { localStorage.setItem(NAME_KEY, $("name").value); } catch (e) {}
+    if (has("POST", "/login")) login().then(refresh);
+  });
+}
 
 const has = (method, path) => (method + " " + path) in routes;
 const params = (method, path) => routes[method + " " + path] || [];
@@ -100,13 +113,58 @@ async function loadRoutes() {
   routes = found;
 }
 
+async function login() {
+  const body = { name: $("name").value.trim() || "guest" };
+  if ($("password").value) body.password = $("password").value;
+  const res = await fetch("/login", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { session = null; showError(res, data); return false; }
+  session = { token: data.access_token, name: data.name, role: data.role };
+  $("error").textContent = "";
+  return true;
+}
+
+// fetch() for writes: logs in first when the API has /login, and logs in
+// again once if the server forgot the token (for example after a restart).
+async function send(url, options = {}) {
+  const withAuth = () => {
+    const headers = { ...(options.headers || {}) };
+    if (session) headers.Authorization = "Bearer " + session.token;
+    return fetch(url, { ...options, headers });
+  };
+  if (has("POST", "/login") && !session && !(await login())) return null;
+  let res = await withAuth();
+  if (res.status === 401 && has("POST", "/login") && (await login())) res = await withAuth();
+  return res;
+}
+
+function showError(res, data) {
+  const detail = Array.isArray(data.detail) ? data.detail.map((d) => d.msg).join("; ") : data.detail;
+  const wait = res.headers.get("Retry-After");
+  $("error").textContent = `${res.status}: ${detail || res.statusText}` + (wait ? ` (retry in ${wait} s)` : "");
+}
+
+async function check(res) {
+  if (res && !res.ok) showError(res, await res.json().catch(() => ({})));
+  else if (res) $("error").textContent = "";
+  return res;
+}
+
 function setEnabled(el, on) {
   el.disabled = !on;
+}
+
+function isSpeaker() {
+  return !has("POST", "/login") || (session && session.role === "speaker");
 }
 
 function applyControls() {
   const canAsk = has("POST", "/questions");
   for (const id of ["text", "name", "send"]) setEnabled($(id), canAsk);
+  setEnabled($("password"), has("POST", "/login"));
+  $("role").textContent = session ? `Logged in as ${session.name} (${session.role})` : "";
 
   const listParams = params("GET", "/questions");
   const canSort = listParams.includes("sort");
@@ -118,11 +176,13 @@ function applyControls() {
 }
 
 function voteRequest(id) {
+  if (has("PUT", "/questions/{question_id}/vote"))
+    return send(`/questions/${id}/vote`, { method: "PUT" });
   const user = encodeURIComponent($("name").value.trim() || "guest");
   if (has("PUT", "/questions/{question_id}/votes/{user}"))
-    return fetch(`/questions/${id}/votes/${user}`, { method: "PUT" });
+    return send(`/questions/${id}/votes/${user}`, { method: "PUT" });
   if (has("POST", "/questions/{question_id}/votes"))
-    return fetch(`/questions/${id}/votes`, { method: "POST" });
+    return send(`/questions/${id}/votes`, { method: "POST" });
   return null;
 }
 
@@ -138,9 +198,10 @@ function render(questions) {
   }
   $("count").textContent = questions.length === 1 ? "1 question" : `${questions.length} questions`;
 
-  const canVote = has("PUT", "/questions/{question_id}/votes/{user}") || has("POST", "/questions/{question_id}/votes");
-  const canPatch = has("PATCH", "/questions/{question_id}");
-  const canDelete = has("DELETE", "/questions/{question_id}");
+  const canVote = has("PUT", "/questions/{question_id}/vote")
+    || has("PUT", "/questions/{question_id}/votes/{user}") || has("POST", "/questions/{question_id}/votes");
+  const canPatch = has("PATCH", "/questions/{question_id}") && isSpeaker();
+  const canDelete = has("DELETE", "/questions/{question_id}") && isSpeaker();
 
   for (const q of questions) {
     const li = document.createElement("li");
@@ -173,14 +234,14 @@ function render(questions) {
     const answer = document.createElement("button");
     answer.textContent = q.answered ? "Reopen" : "Answered";
     setEnabled(answer, canPatch);
-    answer.onclick = () => act(fetch(`/questions/${q.id}`, {
+    answer.onclick = () => act(send(`/questions/${q.id}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ answered: !q.answered }),
     }));
     const del = document.createElement("button");
     del.textContent = "Delete";
     setEnabled(del, canDelete);
-    del.onclick = () => act(fetch(`/questions/${q.id}`, { method: "DELETE" }));
+    del.onclick = () => act(send(`/questions/${q.id}`, { method: "DELETE" }));
     actions.append(answer, del);
 
     li.append(votes, body, actions);
@@ -195,8 +256,15 @@ async function loadQuestions() {
   if (listParams.includes("sort")) query.set("sort", $("sort").value);
   if (listParams.includes("limit")) query.set("limit", "100");
   if (listParams.includes("answered") && $("unanswered").checked) query.set("answered", "false");
-  const res = await fetch("/questions" + (query.size ? "?" + query : ""), { cache: "no-store" });
-  return res.ok ? res.json() : [];
+  const url = "/questions" + (query.size ? "?" + query : "");
+  // Send back the ETag we got last time; 304 means "nothing changed".
+  const headers = cached.url === url && cached.etag ? { "If-None-Match": cached.etag } : {};
+  const res = await fetch(url, { cache: "no-store", headers });
+  if (res.status === 304) return cached.data;
+  if (!res.ok) return [];
+  const data = await res.json();
+  cached = { url, etag: res.headers.get("ETag"), data };
+  return data;
 }
 
 async function refresh() {
@@ -215,27 +283,20 @@ async function refresh() {
 
 async function act(request) {
   if (!request) return;
-  try { await request; } catch (e) {}
+  try { await check(await request); } catch (e) {}
   refresh();
 }
 
 $("ask").addEventListener("submit", async (event) => {
   event.preventDefault();
-  $("error").textContent = "";
   const payload = { text: $("text").value };
   const name = $("name").value.trim();
-  if (name) payload.author = name;
+  if (name && !has("POST", "/login")) payload.author = name;
   try {
-    const res = await fetch("/questions", {
+    const res = await check(await send("/questions", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-    });
-    if (res.ok) {
-      $("text").value = "";
-    } else {
-      const data = await res.json().catch(() => ({}));
-      const detail = Array.isArray(data.detail) ? data.detail.map((d) => d.msg).join("; ") : data.detail;
-      $("error").textContent = `${res.status}: ${detail || res.statusText}`;
-    }
+    }));
+    if (res && res.ok) $("text").value = "";
   } catch (e) {}
   refresh();
 });

@@ -59,10 +59,6 @@ class QuestionStore(Protocol):
         """Delete a question and its votes. False if it did not exist."""
         ...
 
-
-# --- In memory ------------------------------------------------------------------
-
-
 class InMemoryQuestionStore:
     def __init__(self) -> None:
         self._questions: dict[int, Question] = {}
@@ -135,12 +131,8 @@ class InMemoryQuestionStore:
             return True
 
 
-# --- SQLite ---------------------------------------------------------------------
-
-
 class SQLiteQuestionStore:
-    # Every read goes through this query, so `votes` is always the number of
-    # rows in the votes table for that question.
+    # read query
     SELECT = """
         SELECT q.id, q.text, q.author, q.author_email, q.answered, q.created_at,
                COUNT(v.voter) AS votes
@@ -148,8 +140,6 @@ class SQLiteQuestionStore:
         LEFT JOIN votes AS v ON v.question_id = q.id
     """
 
-    # ORDER BY cannot take a "?" parameter, so only these fixed strings ever
-    # go into the SQL (never text that came from a request).
     ORDER_BY = {"recent": "q.id DESC", "votes": "votes DESC, q.id DESC"}
 
     def __init__(self, db_path: str) -> None:
@@ -210,8 +200,7 @@ class SQLiteQuestionStore:
             ).fetchone()
             if exists is None:
                 return None
-            # A second vote from the same voter hits UNIQUE (question_id, voter)
-            # and is ignored, so voting again changes nothing.
+            # A second vote from the same voter is ignored by the UNIQUE constraint on (question_id, voter).
             conn.execute(
                 "INSERT OR IGNORE INTO votes (question_id, voter) VALUES (?, ?)",
                 (question_id, voter),
