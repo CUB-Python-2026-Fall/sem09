@@ -1,0 +1,14 @@
+erDiagram
+    questions {
+        INTEGER id PK
+        TEXT text  "NOT NULL"
+        TEXT author  "NOT NULL"
+        TEXT author_email
+        INTEGER answered  "NOT NULL"
+        TEXT created_at  "NOT NULL"
+    }
+    votes {
+        INTEGER question_id FK,UK "NOT NULL"
+        TEXT voter UK "NOT NULL"
+    }
+    questions ||--o{ votes : "question_id -> questions.id"

@@ -60,6 +60,7 @@ class QuestionStore(Protocol):
         ...
 
 class InMemoryQuestionStore:
+    """A simple store that keeps everything in memory (dicts)."""
     def __init__(self) -> None:
         self._questions: dict[int, Question] = {}
         self._voters: dict[int, set[str]] = {}
