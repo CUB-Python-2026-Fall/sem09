@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AskBoard</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #6b7280;
+    --line: #e3e6eb; --accent: #2f6fde; --accent-text: #ffffff;
+    --good: #1f8a4c; --bad: #c2362f; --disabled: 0.35;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 22px; margin: 0 0 12px; letter-spacing: -0.01em; }
+  .count { color: var(--muted); font-size: 13px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .ask { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+  .ask input[type=text] { flex: 1 1 260px; min-width: 0; padding: 8px 10px; border: 1px solid var(--line);
+                          border-radius: 8px; font: inherit; background: #fff; color: inherit; }
+  .ask input.name { flex: 0 1 140px; }
+  .error { color: var(--bad); font-size: 13px; margin-top: 6px; min-height: 0; }
+  button { font: inherit; border: 1px solid var(--line); background: #fff; color: inherit;
+           border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button:disabled, label.off, select:disabled { opacity: var(--disabled); cursor: default; }
+  .controls { margin: 4px 0 10px; gap: 14px; font-size: 14px; color: var(--muted); }
+  select { font: inherit; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line); background: #fff; color: inherit; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li.q { display: flex; gap: 12px; align-items: center; background: var(--card); border: 1px solid var(--line);
+         border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; transition: transform .25s; }
+  li.q.answered { opacity: 0.6; }
+  .votes { min-width: 56px; text-align: center; }
+  .votes b { display: block; font-size: 22px; line-height: 1; }
+  .votes button { margin-top: 4px; padding: 2px 10px; }
+  .body { flex: 1; min-width: 0; }
+  .text { overflow-wrap: anywhere; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .badge { display: inline-block; font-size: 11px; color: var(--good); border: 1px solid var(--good);
+           border-radius: 999px; padding: 0 6px; margin-left: 6px; }
+  .actions { display: flex; gap: 6px; }
+  .actions button { font-size: 13px; padding: 4px 8px; }
+  .list-off { opacity: var(--disabled); }
+  .placeholder { border: 1px dashed var(--line); border-radius: 10px; height: 64px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>AskBoard</h1>
+    <span class="count" id="count"></span>
+  </header>
+
+  <form class="ask" id="ask">
+    <div class="row">
+      <input type="text" id="text" placeholder="Ask a question" autocomplete="off">
+      <input type="text" class="name" id="name" placeholder="Your name" autocomplete="off">
+      <button class="primary" id="send" type="submit">Ask</button>
+    </div>
+    <div class="error" id="error"></div>
+  </form>
+
+  <div class="row controls">
+    <label id="sort-label">Sort
+      <select id="sort"><option value="votes">by votes</option><option value="recent">newest</option></select>
+    </label>
+    <label id="unanswered-label"><input type="checkbox" id="unanswered"> unanswered only</label>
+  </div>
+
+  <ul id="list"></ul>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let routes = {};      // "METHOD path" -> list of query parameter names
+let busy = false;
+
+// Remember a name per browser so votes come from the same "person".
+const NAME_KEY = "askboard-name";
+try { $("name").value = localStorage.getItem(NAME_KEY) || ""; } catch (e) {}
+if (!$("name").value) $("name").value = "guest-" + Math.floor(Math.random() * 900 + 100);
+$("name").addEventListener("change", () => { try { localStorage.setItem(NAME_KEY, $("name").value); } catch (e) {} });
+
+const has = (method, path) => (method + " " + path) in routes;
+const params = (method, path) => routes[method + " " + path] || [];
+
+async function loadRoutes() {
+  const res = await fetch("/openapi.json", { cache: "no-store" });
+  const spec = await res.json();
+  const found = {};
+  for (const [path, ops] of Object.entries(spec.paths || {})) {
+    for (const [method, op] of Object.entries(ops)) {
+      found[method.toUpperCase() + " " + path] = (op.parameters || [])
+        .filter((p) => p.in === "query").map((p) => p.name);
+    }
+  }
+  routes = found;
+}
+
+function setEnabled(el, on) {
+  el.disabled = !on;
+}
+
+function applyControls() {
+  const canAsk = has("POST", "/questions");
+  for (const id of ["text", "name", "send"]) setEnabled($(id), canAsk);
+
+  const listParams = params("GET", "/questions");
+  const canSort = listParams.includes("sort");
+  const canFilter = listParams.includes("answered");
+  setEnabled($("sort"), canSort);
+  $("sort-label").classList.toggle("off", !canSort);
+  setEnabled($("unanswered"), canFilter);
+  $("unanswered-label").classList.toggle("off", !canFilter);
+}
+
+function voteRequest(id) {
+  const user = encodeURIComponent($("name").value.trim() || "guest");
+  if (has("PUT", "/questions/{question_id}/votes/{user}"))
+    return fetch(`/questions/${id}/votes/${user}`, { method: "PUT" });
+  if (has("POST", "/questions/{question_id}/votes"))
+    return fetch(`/questions/${id}/votes`, { method: "POST" });
+  return null;
+}
+
+function render(questions) {
+  const list = $("list");
+  list.innerHTML = "";
+  const canList = has("GET", "/questions");
+  list.classList.toggle("list-off", !canList);
+  if (!canList) {
+    for (let i = 0; i < 3; i++) list.insertAdjacentHTML("beforeend", '<li class="placeholder"></li>');
+    $("count").textContent = "";
+    return;
+  }
+  $("count").textContent = questions.length === 1 ? "1 question" : `${questions.length} questions`;
+
+  const canVote = has("PUT", "/questions/{question_id}/votes/{user}") || has("POST", "/questions/{question_id}/votes");
+  const canPatch = has("PATCH", "/questions/{question_id}");
+  const canDelete = has("DELETE", "/questions/{question_id}");
+
+  for (const q of questions) {
+    const li = document.createElement("li");
+    li.className = "q" + (q.answered ? " answered" : "");
+
+    const votes = document.createElement("div");
+    votes.className = "votes";
+    const n = document.createElement("b");
+    n.textContent = q.votes ?? 0;
+    const up = document.createElement("button");
+    up.textContent = "▲";
+    up.title = "Vote";
+    setEnabled(up, canVote);
+    up.onclick = () => act(voteRequest(q.id));
+    votes.append(n, up);
+
+    const body = document.createElement("div");
+    body.className = "body";
+    const text = document.createElement("div");
+    text.className = "text";
+    text.textContent = q.text;
+    if (q.answered) text.insertAdjacentHTML("beforeend", '<span class="badge">answered</span>');
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `#${q.id} · ${q.author ?? ""}`;
+    body.append(text, meta);
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const answer = document.createElement("button");
+    answer.textContent = q.answered ? "Reopen" : "Answered";
+    setEnabled(answer, canPatch);
+    answer.onclick = () => act(fetch(`/questions/${q.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answered: !q.answered }),
+    }));
+    const del = document.createElement("button");
+    del.textContent = "Delete";
+    setEnabled(del, canDelete);
+    del.onclick = () => act(fetch(`/questions/${q.id}`, { method: "DELETE" }));
+    actions.append(answer, del);
+
+    li.append(votes, body, actions);
+    list.append(li);
+  }
+}
+
+async function loadQuestions() {
+  if (!has("GET", "/questions")) return [];
+  const listParams = params("GET", "/questions");
+  const query = new URLSearchParams();
+  if (listParams.includes("sort")) query.set("sort", $("sort").value);
+  if (listParams.includes("limit")) query.set("limit", "100");
+  if (listParams.includes("answered") && $("unanswered").checked) query.set("answered", "false");
+  const res = await fetch("/questions" + (query.size ? "?" + query : ""), { cache: "no-store" });
+  return res.ok ? res.json() : [];
+}
+
+async function refresh() {
+  if (busy) return;
+  busy = true;
+  try {
+    await loadRoutes();
+    applyControls();
+    render(await loadQuestions());
+  } catch (e) {
+    // server restarting: keep the last view and try again on the next tick
+  } finally {
+    busy = false;
+  }
+}
+
+async function act(request) {
+  if (!request) return;
+  try { await request; } catch (e) {}
+  refresh();
+}
+
+$("ask").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("error").textContent = "";
+  const payload = { text: $("text").value };
+  const name = $("name").value.trim();
+  if (name) payload.author = name;
+  try {
+    const res = await fetch("/questions", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      $("text").value = "";
+    } else {
+      const data = await res.json().catch(() => ({}));
+      const detail = Array.isArray(data.detail) ? data.detail.map((d) => d.msg).join("; ") : data.detail;
+      $("error").textContent = `${res.status}: ${detail || res.statusText}`;
+    }
+  } catch (e) {}
+  refresh();
+});
+$("sort").addEventListener("change", refresh);
+$("unanswered").addEventListener("change", refresh);
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
