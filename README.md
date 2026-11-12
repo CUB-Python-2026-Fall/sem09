@@ -1,4 +1,8 @@
-# AskBoard
+# Seminar 9: Building HTTP applications and databases
+
+In this seminar we build an HTTP API step by step with FastAPI, then move its data from memory to a SQLite database. The seminar notebook is [`sem09.ipynb`](sem09.ipynb).
+
+## AskBoard
 
 A live Q&A board API: people log in, post questions and upvote them, and the speaker marks them as answered. Built with FastAPI. Data is kept in memory by default, or in SQLite (the standard library `sqlite3` module, no ORM).
 
